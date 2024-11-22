@@ -1,19 +1,31 @@
 import discord
 from discord.ext import commands
 import asyncio
-from dotenv import load_dotenv
 import os
+from dotenv import load_dotenv
 
 # Charger les variables depuis le fichier .env
 load_dotenv()
+
+# Récupération des variables d'environnement
+TOKEN = os.getenv("DISCORD_BOT_TOKEN")
+CHANNEL_ID = int(
+    os.getenv("CHANNEL_ID")
+)  # Assurez-vous que CHANNEL_ID est bien un nombre
+
+# Vérifications
+if not TOKEN:
+    print("Erreur : Le token du bot n'est pas défini dans le fichier .env.")
+    exit(1)
+
+if not CHANNEL_ID:
+    print("Erreur : L'ID du canal n'est pas défini dans le fichier .env.")
+    exit(1)
 
 # Crée une instance de bot
 intents = discord.Intents.default()
 intents.members = True  # Pour gérer les membres (mute, unmute)
 bot = commands.Bot(command_prefix="!", intents=intents)
-
-# ID du canal réservé au stream
-CHANNEL_ID = 1307098261173174406  # Remplace par l'ID du canal vocal où tu veux appliquer la logique
 
 # Liste pour éviter les boucles infinies
 processing_users = set()
@@ -60,7 +72,7 @@ async def on_voice_state_update(member, before, after):
                     )
 
                 try:
-                    response = await bot.wait_for("message", check=check, timeout=10.0)
+                    response = await bot.wait_for("message", check=check, timeout=30.0)
 
                     if response.content.lower() == "oui":
                         # Démute l'utilisateur si la réponse est "oui"
@@ -103,12 +115,5 @@ async def start(ctx):
     )
 
 
-# Lancer le bot avec votre token
-if __name__ == "__main__":
-    TOKEN = os.getenv(
-        "DISCORD_BOT_TOKEN"
-    )  # Assurez-vous de définir cette variable d'environnement
-    if TOKEN:
-        bot.run(TOKEN)
-    else:
-        print("Erreur : le token du bot n'est pas défini.")
+# Lancer le bot
+bot.run(TOKEN)
