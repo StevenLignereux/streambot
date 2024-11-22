@@ -1,124 +1,114 @@
 import discord
 from discord.ext import commands
 import asyncio
+from dotenv import load_dotenv
+import os
 
+# Charger les variables depuis le fichier .env
+load_dotenv()
+
+# Crée une instance de bot
 intents = discord.Intents.default()
-intents.messages = True
-intents.reactions = True
-intents.voice_states = True
-intents.message_content = True  # Ajoutez cette ligne pour activer l'intent message_content
-intents.members = True  # Ajoutez cette ligne pour activer l'intent members
-
+intents.members = True  # Pour gérer les membres (mute, unmute)
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ID du canal vocal que tu veux restreindre
-voice_channel_id = ""
+# ID du canal réservé au stream
+CHANNEL_ID = 1307098261173174406  # Remplace par l'ID du canal vocal où tu veux appliquer la logique
 
-# Dictionnaire pour stocker les IDs de guilde et de message
-confirmation_messages = {}
+# Liste pour éviter les boucles infinies
+processing_users = set()
 
-# Dictionnaire pour suivre les membres qui ont déjà reçu une demande de confirmation
-pending_confirmations = {}
-
-@bot.event
-async def on_ready():
-    print(f"Connecté en tant que {bot.user}")
-    print("Guildes auxquelles le bot est connecté :")
-    for guild in bot.guilds:
-        print(f"Nom de la guilde : {guild.name}, ID de la guilde : {guild.id}")
-        print("Membres de la guilde :")
-        for member in guild.members:
-            print(f"Nom du membre : {member.name}, ID du membre : {member.id}")
 
 @bot.event
 async def on_voice_state_update(member, before, after):
-    if after.channel and after.channel.id == voice_channel_id:
-        # Vérifie si le membre a déjà une demande de confirmation en attente
-        if member.id in pending_confirmations:
+    # Vérifie si l'utilisateur rejoint le canal vocal spécifique
+    if after.channel is not None and after.channel.id == CHANNEL_ID:
+        # Empêche les boucles infinies en vérifiant si l'utilisateur est déjà en cours de traitement
+        if member.id in processing_users:
             return
 
-        # Empêche les événements ultérieurs pour ce membre jusqu'à la confirmation
-        bot.prevent_double_confirmation = True
+        # Ajoute l'utilisateur à la liste de traitement
+        processing_users.add(member.id)
 
-        # Déplace immédiatement l'utilisateur hors du canal vocal
-        await member.move_to(None)
-
-        # Envoie un message de confirmation en privé (DM)
         try:
-            msg = await member.send("Veux-tu vraiment te connecter au canal vocal ? Réagis avec ✅ pour confirmer.")
-            await msg.add_reaction("✅")
+            # Vérifie si le bot a les permissions nécessaires
+            if not after.channel.guild.me.guild_permissions.mute_members:
+                print("Le bot n'a pas la permission de mute des membres.")
+                return
 
-            # Stocke l'ID de la guilde et du message
-            confirmation_messages[msg.id] = (member.guild.id, member.id)
-            pending_confirmations[member.id] = msg.id
+            # Mute l'utilisateur immédiatement
+            await member.edit(mute=True)
 
-            def check(reaction, user):
-                return user == member and str(reaction.emoji) == "✅" and reaction.message.id == msg.id
+            # Ajout d'un délai pour éviter le rate limit
+            await asyncio.sleep(1)
 
+            # Envoie un message privé à l'utilisateur
             try:
-                # Attend la réaction de l'utilisateur
-                reaction, user = await bot.wait_for('reaction_add', timeout=60.0, check=check)
-            except asyncio.TimeoutError:
-                await member.send("Tu n'as pas confirmé à temps.")
-                # Supprime l'entrée du dictionnaire après le timeout
-                if member.id in pending_confirmations:
-                    del pending_confirmations[member.id]
-            else:
-                # Vérifie si l'utilisateur est toujours en attente de rejoindre le même canal vocal
-                if bot.prevent_double_confirmation:
-                    # Vérifie si le membre est toujours connecté à un canal vocal
-                    if member.voice and member.voice.channel:
-                        # Permet au membre de rejoindre le canal vocal
-                        channel = discord.utils.get(member.guild.voice_channels, id=voice_channel_id)
-                        await member.move_to(channel)
-                        await member.send("Tu as confirmé et as été déplacé dans le canal vocal.")
+                dm = await member.create_dm()  # Crée un canal de message privé
+                await dm.send(
+                    "Tu es actuellement mute dans le canal réservé au stream. "
+                    "Ce canal est réservé aux streams. Si tu souhaites être démuté, "
+                    "réponds par 'oui'. Sinon, tu seras expulsé du canal vocal."
+                )
+
+                # Attendre la réponse de l'utilisateur dans le DM pendant un certain temps
+                def check(m):
+                    return (
+                        m.author == member
+                        and m.channel == dm
+                        and m.content.lower() in ["oui", "non"]
+                    )
+
+                try:
+                    response = await bot.wait_for("message", check=check, timeout=10.0)
+
+                    if response.content.lower() == "oui":
+                        # Démute l'utilisateur si la réponse est "oui"
+                        await member.edit(mute=False)
+                        await dm.send("Tu as été démuté.")
                     else:
-                        await member.send("Tu n'es plus connecté à un canal vocal.")
-                    # Supprime l'entrée du dictionnaire après confirmation
-                    if member.id in pending_confirmations:
-                        del pending_confirmations[member.id]
-                bot.prevent_double_confirmation = False
-        except discord.Forbidden:
-            print(f"Impossible d'envoyer un DM à {member.name}")
+                        # Expulse l'utilisateur du canal vocal si la réponse est "non"
+                        await member.move_to(
+                            None
+                        )  # Déplace l'utilisateur en dehors du canal vocal
+                        await dm.send(
+                            "Tu as été expulsé du canal vocal pour ne pas avoir confirmé."
+                        )
 
-@bot.event
-async def on_raw_reaction_add(payload):
-    # Ignorer les réactions du bot
-    if payload.user_id == bot.user.id:
-        return
+                except asyncio.TimeoutError:
+                    # Si l'utilisateur ne répond pas à temps, expulsion
+                    await member.move_to(None)
+                    await dm.send(
+                        "Tu n'as pas répondu à temps, et as été expulsé du canal vocal."
+                    )
 
-    # Vérifie si le message ID est dans le dictionnaire
-    if payload.message_id in confirmation_messages:
-        guild_id, member_id = confirmation_messages[payload.message_id]
+            except discord.errors.Forbidden:
+                # Si le bot ne peut pas envoyer de message privé (ex. si l'utilisateur a les DMs fermés)
+                await member.move_to(None)
+                print(f"Impossible d'envoyer un message à {member.name}. DMs fermés ?")
 
-        # Récupérer la guilde
-        guild = bot.get_guild(guild_id)
-        if guild is None:
-            print(f"Impossible de trouver la guilde avec l'ID {guild_id}")
-            return
+        except Exception as e:
+            print(f"Une erreur s'est produite : {e}")
 
-        # Récupérer le membre
-        member = guild.get_member(member_id)
-        if member is None:
-            print(f"Impossible de trouver le membre avec l'ID {member_id}")
-            return
+        finally:
+            # Retire l'utilisateur de la liste de traitement
+            processing_users.remove(member.id)
 
-        # Vérifie si la réaction est celle de confirmation
-        if str(payload.emoji) == "✅":
-            # Vérifie si le membre est toujours connecté à un canal vocal
-            if member.voice and member.voice.channel:
-                # Permet au membre de rejoindre le canal vocal
-                channel = discord.utils.get(guild.voice_channels, id=voice_channel_id)
-                if channel:
-                    await member.move_to(channel)
-                    await member.send("Tu as confirmé et as été déplacé dans le canal vocal.")
-                else:
-                    print(f"Impossible de trouver le canal vocal avec l'ID {voice_channel_id}")
-            else:
-                await member.send("Tu n'es plus connecté à un canal vocal.")
-            # Supprime l'entrée du dictionnaire après confirmation
-            if member.id in pending_confirmations:
-                del pending_confirmations[member.id]
 
-bot.run('')
+# Commande pour démarrer le bot
+@bot.command()
+async def start(ctx):
+    await ctx.send(
+        "Le bot est en ligne et prêt à gérer les mutings dans le canal de stream."
+    )
 
+
+# Lancer le bot avec votre token
+if __name__ == "__main__":
+    TOKEN = os.getenv(
+        "DISCORD_BOT_TOKEN"
+    )  # Assurez-vous de définir cette variable d'environnement
+    if TOKEN:
+        bot.run(TOKEN)
+    else:
+        print("Erreur : le token du bot n'est pas défini.")
